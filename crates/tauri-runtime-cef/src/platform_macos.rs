@@ -4,10 +4,12 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Once;
 
 use cef::ImplWindow;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
+use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
 use objc2_app_kit::{
   NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
   NSApplicationPresentationOptions, NSBackingStoreType, NSCursor, NSEvent, NSEventModifierFlags,
@@ -35,6 +37,10 @@ fn ns_window(window: &cef::Window) -> Option<Retained<NSWindow>> {
     let ns_view = Retained::<NSView>::retain(window.window_handle() as _)?;
     ns_view.window()
   }
+}
+
+unsafe fn ns_window_from_object(this: *mut AnyObject) -> Option<Retained<NSWindow>> {
+  unsafe { Retained::<NSWindow>::retain(this.cast()) }
 }
 
 fn main_thread() -> Option<MainThreadMarker> {
@@ -255,63 +261,135 @@ thread_local! {
     RefCell::new(HashMap::new());
 }
 
-/// Pre-Lion style fullscreen, mirroring `tao`'s `set_simple_fullscreen`: hide
-/// the dock and menu bar, drop the title bar, resize to the screen frame, and
-/// lock the window down — restoring everything on exit.
-pub fn set_simple_fullscreen(window: &cef::Window, fullscreen: bool) {
+pub fn is_simple_fullscreen(window: &cef::Window) -> bool {
+  let Some(ns_window) = ns_window(window) else {
+    return false;
+  };
+  let key = (&*ns_window as *const NSWindow) as usize;
+  SIMPLE_FULLSCREEN.with(|cell| cell.borrow().contains_key(&key))
+}
+
+fn screen_safe_area_frame(screen: &NSScreen) -> NSRect {
+  let mut frame = screen.frame();
+  let insets = unsafe { screen.safeAreaInsets() };
+
+  frame.origin.x += insets.left;
+  frame.origin.y += insets.bottom;
+
+  let width = frame.size.width - insets.left - insets.right;
+  frame.size.width = if width > 1.0 { width } else { 1.0 };
+
+  let height = frame.size.height - insets.top - insets.bottom;
+  frame.size.height = if height > 1.0 { height } else { 1.0 };
+
+  frame
+}
+
+fn set_simple_fullscreen_for_ns_window(ns_window: &NSWindow, fullscreen: bool) {
   let Some(mtm) = main_thread() else {
     return;
   };
-  let Some(ns_window) = ns_window(window) else {
-    return;
-  };
   let app = NSApplication::sharedApplication(mtm);
-  let key = (&*ns_window as *const NSWindow) as usize;
+  let key = ns_window as *const NSWindow as usize;
 
-  SIMPLE_FULLSCREEN.with(|cell| {
-    let mut map = cell.borrow_mut();
-    let is_simple_fullscreen = map.contains_key(&key);
-    if fullscreen == is_simple_fullscreen {
+  if fullscreen {
+    // Remember the original window settings (content rect excludes the title bar).
+    let state = SimpleFullscreenState {
+      standard_frame: ns_window.contentRectForFrameRect(ns_window.frame()),
+      saved_style: ns_window.styleMask(),
+      saved_presentation_options: app.presentationOptions(),
+    };
+
+    let should_enter = SIMPLE_FULLSCREEN.with(|cell| {
+      let mut map = cell.borrow_mut();
+      if map.contains_key(&key) {
+        false
+      } else {
+        map.insert(key, state);
+        true
+      }
+    });
+    if !should_enter {
       return;
     }
 
-    if fullscreen {
-      // Remember the original window settings (content rect excludes the title bar).
-      map.insert(
-        key,
-        SimpleFullscreenState {
-          standard_frame: ns_window.contentRectForFrameRect(ns_window.frame()),
-          saved_style: ns_window.styleMask(),
-          saved_presentation_options: app.presentationOptions(),
-        },
-      );
+    // Simulate pre-Lion fullscreen by hiding the dock and menu bar.
+    app.setPresentationOptions(
+      NSApplicationPresentationOptions::AutoHideDock
+        | NSApplicationPresentationOptions::AutoHideMenuBar,
+    );
 
-      // Simulate pre-Lion fullscreen by hiding the dock and menu bar.
-      app.setPresentationOptions(
-        NSApplicationPresentationOptions::AutoHideDock
-          | NSApplicationPresentationOptions::AutoHideMenuBar,
-      );
+    // Hide the title bar.
+    let mut mask = ns_window.styleMask();
+    mask &= !NSWindowStyleMask::Titled;
+    ns_window.setStyleMask(mask);
 
-      // Hide the title bar.
-      let mut mask = ns_window.styleMask();
-      mask &= !NSWindowStyleMask::Titled;
-      ns_window.setStyleMask(mask);
+    // Resize to the display's safe area so the simulated fullscreen doesn't
+    // place content under the camera housing on notched MacBook displays.
+    if let Some(screen) = ns_window.screen() {
+      ns_window.setFrame_display(screen_safe_area_frame(&screen), true);
+    }
 
-      // Resize to the full screen frame.
-      if let Some(screen) = ns_window.screen() {
-        ns_window.setFrame_display(screen.frame(), true);
-      }
+    // Fullscreen windows can't be resized, minimized, or moved.
+    let mut mask = ns_window.styleMask();
+    mask &= !(NSWindowStyleMask::Miniaturizable | NSWindowStyleMask::Resizable);
+    ns_window.setStyleMask(mask);
+    ns_window.setMovable(false);
+  } else {
+    let Some(state) = SIMPLE_FULLSCREEN.with(|cell| cell.borrow_mut().remove(&key)) else {
+      return;
+    };
 
-      // Fullscreen windows can't be resized, minimized, or moved.
-      let mut mask = ns_window.styleMask();
-      mask &= !(NSWindowStyleMask::Miniaturizable | NSWindowStyleMask::Resizable);
-      ns_window.setStyleMask(mask);
-      ns_window.setMovable(false);
-    } else if let Some(state) = map.remove(&key) {
-      ns_window.setStyleMask(state.saved_style);
-      app.setPresentationOptions(state.saved_presentation_options);
-      ns_window.setFrame_display(state.standard_frame, true);
-      ns_window.setMovable(true);
+    ns_window.setStyleMask(state.saved_style);
+    app.setPresentationOptions(state.saved_presentation_options);
+    ns_window.setFrame_display(state.standard_frame, true);
+    ns_window.setMovable(true);
+  }
+}
+
+/// Pre-Lion style fullscreen, mirroring `tao`'s `set_simple_fullscreen`: hide
+/// the dock and menu bar, drop the title bar, resize to the screen safe-area
+/// frame, and lock the window down — restoring everything on exit.
+pub fn set_simple_fullscreen(window: &cef::Window, fullscreen: bool) {
+  let Some(ns_window) = ns_window(window) else {
+    return;
+  };
+  set_simple_fullscreen_for_ns_window(&ns_window, fullscreen);
+}
+
+pub fn install_simple_fullscreen_toggle_handler() {
+  static PATCH: Once = Once::new();
+
+  PATCH.call_once(|| {
+    unsafe extern "C-unwind" fn toggle_full_screen(
+      this: *mut AnyObject,
+      _cmd: Sel,
+      _sender: *mut AnyObject,
+    ) {
+      let Some(ns_window) = (unsafe { ns_window_from_object(this) }) else {
+        return;
+      };
+      let key = (&*ns_window as *const NSWindow) as usize;
+      let fullscreen = SIMPLE_FULLSCREEN.with(|cell| !cell.borrow().contains_key(&key));
+      set_simple_fullscreen_for_ns_window(&ns_window, fullscreen);
+    }
+
+    let Some(window_class) = AnyClass::get(c"NSWindow") else {
+      return;
+    };
+    let selector = Sel::register(c"toggleFullScreen:");
+    let method = unsafe { objc2::ffi::class_getInstanceMethod(window_class, selector) };
+    if method.is_null() {
+      return;
+    }
+
+    let imp: Imp = unsafe {
+      std::mem::transmute(
+        toggle_full_screen as unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject),
+      )
+    };
+    unsafe {
+      objc2::ffi::method_setImplementation(method, imp);
     }
   });
 }

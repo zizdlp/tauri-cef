@@ -16,7 +16,9 @@ impl CefBrowserExt for cef::Browser {
       return cef::Rect::default();
     };
 
-    let parent = unsafe { nsview.superview().unwrap() };
+    let Some(parent) = (unsafe { nsview.superview() }) else {
+      return cef::Rect::default();
+    };
     let parent_frame = parent.frame();
     let webview_frame = nsview.frame();
 
@@ -37,7 +39,9 @@ impl CefBrowserExt for cef::Browser {
       return;
     };
 
-    let parent = unsafe { nsview.superview().unwrap() };
+    let Some(parent) = (unsafe { nsview.superview() }) else {
+      return;
+    };
     let parent_frame = parent.frame();
 
     let origin = NSPoint {

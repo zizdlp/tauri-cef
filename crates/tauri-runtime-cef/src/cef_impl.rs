@@ -2098,6 +2098,9 @@ wrap_window_delegate! {
 
         if let Some(fullscreen) = a.fullscreen
           && fullscreen {
+            #[cfg(target_os = "macos")]
+            crate::platform::set_simple_fullscreen(window, true);
+            #[cfg(not(target_os = "macos"))]
             window.set_fullscreen(1);
           }
 
@@ -2283,6 +2286,9 @@ wrap_window_delegate! {
       #[cfg(target_os = "linux")]
       raise_window_webviews(self.window_id, &self.windows);
 
+      #[cfg(target_os = "macos")]
+      refresh_window_webviews(self.window_id, &self.windows);
+
       let scale = window_scale_factor(window);
 
       #[cfg(not(windows))]
@@ -2362,6 +2368,11 @@ wrap_window_delegate! {
         refresh_window_webviews(self.window_id, &self.windows);
       }
 
+      #[cfg(target_os = "macos")]
+      if active == 1 {
+        refresh_window_webviews(self.window_id, &self.windows);
+      }
+
       send_window_event(
         self.window_id,
         &self.windows,
@@ -2409,6 +2420,60 @@ fn refresh_window_webviews(
     for webview in &app_window.webviews {
       webview.inner.raise();
       webview.inner.refresh_render_target();
+    }
+  }
+}
+
+/// Re-applies visibility and current bounds to macOS CEF child webviews after
+/// AppKit moves the window through fullscreen/Space transitions. The native
+/// view can remain visible while its compositor is left without a fresh frame.
+#[cfg(target_os = "macos")]
+fn refresh_window_webviews(
+  window_id: WindowId,
+  windows: &Arc<RefCell<HashMap<WindowId, AppWindow>>>,
+) {
+  let Ok(windows_ref) = windows.try_borrow() else {
+    return;
+  };
+  if let Some(app_window) = windows_ref.get(&window_id) {
+    let window_bounds = app_window.window.bounds();
+    if window_bounds.width <= 0 || window_bounds.height <= 0 {
+      return;
+    }
+
+    for webview in &app_window.webviews {
+      if !webview.visible.load(Ordering::SeqCst) {
+        continue;
+      }
+
+      webview.inner.set_visible(1);
+
+      let mut bounds = webview
+        .bounds
+        .lock()
+        .ok()
+        .and_then(|stored| {
+          stored.as_ref().map(|bounds| cef::Rect {
+            x: (window_bounds.width as f32 * bounds.x_rate).round() as i32,
+            y: (window_bounds.height as f32 * bounds.y_rate).round() as i32,
+            width: (window_bounds.width as f32 * bounds.width_rate).round() as i32,
+            height: (window_bounds.height as f32 * bounds.height_rate).round() as i32,
+          })
+        })
+        .unwrap_or_else(|| webview.inner.bounds());
+
+      if bounds.width <= 0 || bounds.height <= 0 {
+        bounds = cef::Rect {
+          x: 0,
+          y: 0,
+          width: window_bounds.width,
+          height: window_bounds.height,
+        };
+      }
+
+      if bounds.width > 0 && bounds.height > 0 {
+        webview.inner.set_bounds(Some(&bounds));
+      }
     }
   }
 }
@@ -2641,11 +2706,13 @@ fn handle_webview_message<T: UserEvent>(
     }
     WebviewMessage::Show => {
       if let Some(wrapper) = get_webview(context, window_id, webview_id) {
+        wrapper.visible.store(true, Ordering::SeqCst);
         wrapper.inner.set_visible(1)
       }
     }
     WebviewMessage::Hide => {
       if let Some(wrapper) = get_webview(context, window_id, webview_id) {
+        wrapper.visible.store(false, Ordering::SeqCst);
         wrapper.inner.set_visible(0)
       }
     }
@@ -3169,16 +3236,24 @@ fn start_window_dragging(window: &cef::Window) {
         event = ns_app.currentEvent();
       }
 
+      if let Some(current_event) = event.as_ref()
+        && current_event.r#type() == NSEventType::LeftMouseDown
+      {
+        ns_window.performWindowDragWithEvent(current_event);
+        return;
+      }
+
       // Create a mouse event for dragging
       // If we have a current event, try to use its properties
       let drag_event = if let Some(current_event) = event {
         let event_modifier_flags = current_event.modifierFlags();
         let event_timestamp = current_event.timestamp();
         let event_window_number = current_event.windowNumber();
+        let event_location = current_event.locationInWindow();
 
         NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
             NSEventType::LeftMouseDown,
-            mouse_location,
+            event_location,
             event_modifier_flags,
             event_timestamp,
             event_window_number,
@@ -3188,9 +3263,11 @@ fn start_window_dragging(window: &cef::Window) {
             1.0,
           )
       } else {
+        let window_location = ns_window.convertPointFromScreen(mouse_location);
+
         NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
             NSEventType::LeftMouseDown,
-            mouse_location,
+            window_location,
             NSEventModifierFlags::empty(),
             0.0,
             ns_window.windowNumber(),
@@ -3436,7 +3513,16 @@ fn handle_window_message<T: UserEvent>(
         .windows
         .borrow()
         .get(&window_id)
-        .map(|w| Ok(w.window.is_fullscreen() == 1))
+        .map(|w| {
+          #[cfg(target_os = "macos")]
+          {
+            Ok(crate::platform::is_simple_fullscreen(&w.window) || w.window.is_fullscreen() == 1)
+          }
+          #[cfg(not(target_os = "macos"))]
+          {
+            Ok(w.window.is_fullscreen() == 1)
+          }
+        })
         .unwrap_or_else(|| Err(tauri_runtime::Error::FailedToSendMessage));
       let _ = tx.send(result);
     }
@@ -3812,16 +3898,22 @@ fn handle_window_message<T: UserEvent>(
     }
     WindowMessage::SetFullscreen(fullscreen) => {
       if let Some(app_window) = context.windows.borrow().get(&window_id) {
+        #[cfg(target_os = "macos")]
+        crate::platform::set_simple_fullscreen(&app_window.window, fullscreen);
+        #[cfg(not(target_os = "macos"))]
         app_window
           .window
           .set_fullscreen(if fullscreen { 1 } else { 0 });
       }
+      #[cfg(target_os = "macos")]
+      refresh_window_webviews(window_id, &context.windows);
     }
     #[cfg(target_os = "macos")]
     WindowMessage::SetSimpleFullscreen(fullscreen) => {
       if let Some(app_window) = context.windows.borrow().get(&window_id) {
         crate::platform::set_simple_fullscreen(&app_window.window, fullscreen);
       }
+      refresh_window_webviews(window_id, &context.windows);
     }
     WindowMessage::SetFocus => {
       if let Some(app_window) = context.windows.borrow().get(&window_id) {
@@ -4004,8 +4096,7 @@ pub fn handle_message<T: UserEvent>(context: &Context<T>, message: Message<T>) {
         });
       });
 
-      let should_prevent =
-        matches!(rx.try_recv(), Ok(ExitRequestedEventAction::Prevent));
+      let should_prevent = matches!(rx.try_recv(), Ok(ExitRequestedEventAction::Prevent));
       if should_prevent {
         return;
       }
@@ -4450,7 +4541,20 @@ fn post_quit_message_loop<T: UserEvent>(context: &Context<T>) {
 pub fn close_all_windows(windows: &Arc<RefCell<HashMap<WindowId, AppWindow>>>) {
   let window_ids: Vec<_> = windows.borrow().keys().copied().collect();
   for window_id in window_ids {
-    on_window_close(window_id, windows);
+    let has_webviews = {
+      let windows_ref = windows.borrow();
+      let Some(app_window) = windows_ref.get(&window_id) else {
+        continue;
+      };
+      app_window.force_close.store(true, Ordering::SeqCst);
+      !app_window.webviews.is_empty()
+    };
+
+    if has_webviews {
+      close_window_browsers(window_id, windows);
+    } else {
+      on_window_close(window_id, windows);
+    }
   }
 }
 
@@ -4822,6 +4926,7 @@ pub(crate) fn create_webview<T: UserEvent>(
             webview_id,
             browser_id: Arc::new(RefCell::new(browser_id_val)),
             bounds: Arc::new(Mutex::new(initial_bounds_ratio)),
+            visible: Arc::new(AtomicBool::new(true)),
             inner: browser,
             devtools_enabled,
             uri_scheme_protocols: Arc::new(uri_scheme_protocols),
@@ -4887,6 +4992,7 @@ pub(crate) fn create_webview<T: UserEvent>(
             webview_id,
             browser_id,
             bounds: Arc::new(Mutex::new(None)),
+            visible: Arc::new(AtomicBool::new(true)),
             devtools_enabled,
             uri_scheme_protocols,
             initialization_scripts,

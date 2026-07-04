@@ -322,6 +322,7 @@ pub(crate) struct AppWebview {
   // so we need to use the browser_id to identify the browser
   pub browser_id: Arc<RefCell<i32>>,
   pub bounds: Arc<Mutex<Option<WebviewBounds>>>,
+  pub visible: Arc<AtomicBool>,
   #[allow(unused)]
   pub devtools_enabled: bool,
   pub uri_scheme_protocols:
@@ -2054,6 +2055,7 @@ impl<T: UserEvent> CefRuntime<T> {
     }
 
     command_line_args.push(("--enable-media-stream".to_string(), None));
+    command_line_args.push(("--disable-print-preview".to_string(), None));
 
     let mut app = cef_impl::TauriApp::new(
       cef_context.clone(),
@@ -2580,7 +2582,9 @@ mod application {
     rc::Retained,
     runtime::{AnyObject, Bool, NSObject, NSObjectProtocol},
   };
-  use objc2_app_kit::{NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSEvent};
+  use objc2_app_kit::{
+    NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSEvent, NSEventType,
+  };
   use objc2_foundation::{NSArray, NSString, NSURL};
 
   /// Application-level events surfaced from the macOS `NSApplication` /
@@ -2761,6 +2765,10 @@ mod application {
       // `-sendEvent:` calls (modal loops, event tracking) stay correct.
       #[unsafe(method(sendEvent:))]
       unsafe fn sendEvent(&self, event: &NSEvent) {
+        if unsafe { event.r#type() } == NSEventType::CursorUpdate {
+          return;
+        }
+
         let was_handling = self.ivars().handling_send_event.get();
         self.ivars().handling_send_event.set(Bool::YES);
         let _: () = unsafe { msg_send![super(self), sendEvent: event] };

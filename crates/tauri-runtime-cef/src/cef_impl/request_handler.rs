@@ -293,7 +293,7 @@ wrap_resource_handler! {
           response_store.into_owned().borrow_mut().replace(response);
 
           let callback = callback.into_owned();
-          callback.cont();
+          post_callback_cont(callback);
         });
 
         let label = self.webview_label.clone();
@@ -462,6 +462,26 @@ impl<T> ThreadSafe<T> {
 
 unsafe impl<T> Send for ThreadSafe<T> {}
 unsafe impl<T> Sync for ThreadSafe<T> {}
+
+// CEF Callback objects must be released on the CEF IO thread.
+// Calling cont() or dropping a Callback from an arbitrary Rust thread causes
+// the C++ destructor to throw, which crosses the FFI boundary and aborts.
+wrap_task! {
+  struct CallbackContTask {
+    callback: Callback,
+  }
+
+  impl Task {
+    fn execute(&self) {
+      self.callback.cont();
+    }
+  }
+}
+
+fn post_callback_cont(callback: Callback) {
+  let mut task = CallbackContTask::new(callback);
+  cef::post_task(cef::sys::cef_thread_id_t::TID_IO.into(), Some(&mut task));
+}
 
 fn read_request_body(request: &mut Request) -> Vec<u8> {
   let mut body = Vec::new();
