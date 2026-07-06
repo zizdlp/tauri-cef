@@ -11,6 +11,7 @@ use cef::{ImplView, ImplWindow};
 use tauri_runtime::dpi::{PhysicalPosition, Position};
 use tauri_runtime::window::CursorIcon;
 use tauri_runtime::{ProgressBarState, ProgressBarStatus, ResizeDirection, UserAttentionType};
+use tauri_utils::config::Color;
 use x11_dl::xlib;
 
 // EWMH / X11 constants not exported by x11-dl.
@@ -167,6 +168,31 @@ pub fn set_visible_on_all_workspaces(window: &cef::Window, visible: bool) {
   // GTK's `stick`/`unstick` (used by tao) maps to the `_NET_WM_STATE_STICKY` hint.
   with_x11((), |xlib, display| {
     set_wm_state(xlib, display, xid, visible, "_NET_WM_STATE_STICKY", None);
+  });
+}
+
+pub fn set_background_color(window: &cef::Window, color: Option<Color>) {
+  let Some(color) = color else {
+    return;
+  };
+
+  let xid = window.window_handle() as c_ulong;
+  with_x11((), |xlib, display| unsafe {
+    let screen = (xlib.XDefaultScreen)(display);
+    let colormap = (xlib.XDefaultColormap)(display, screen);
+    let mut xcolor = xlib::XColor {
+      pixel: 0,
+      red: u16::from(color.0) * 257,
+      green: u16::from(color.1) * 257,
+      blue: u16::from(color.2) * 257,
+      flags: xlib::DoRed | xlib::DoGreen | xlib::DoBlue,
+      pad: 0,
+    };
+
+    if (xlib.XAllocColor)(display, colormap, &mut xcolor) != 0 {
+      (xlib.XSetWindowBackground)(display, xid, xcolor.pixel);
+      (xlib.XClearWindow)(display, xid);
+    }
   });
 }
 

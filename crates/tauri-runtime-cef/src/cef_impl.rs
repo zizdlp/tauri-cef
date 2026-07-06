@@ -2131,6 +2131,15 @@ wrap_window_delegate! {
           crate::platform::set_shadow(window, shadow);
         }
 
+        #[cfg(any(
+          target_os = "linux",
+          target_os = "dragonfly",
+          target_os = "freebsd",
+          target_os = "netbsd",
+          target_os = "openbsd"
+        ))]
+        crate::platform::set_background_color(window, a.background_color);
+
         if let Some(focusable) = a.focusable {
           window.set_focusable(if focusable { 1 } else { 0 });
         }
@@ -2248,6 +2257,13 @@ wrap_window_delegate! {
       // On Windows, we need to get the inner size because the bounds include the window borders.
       #[cfg(windows)]
       let size = crate::utils::windows::inner_size(window.window_handle());
+
+      #[cfg(windows)]
+      if let Ok(mut windows_ref) = self.windows.try_borrow_mut()
+        && let Some(app_window) = windows_ref.get_mut(&self.window_id)
+      {
+        crate::platform::draw_background_surface(app_window);
+      }
 
       // Update autoresize overlay bounds
       let bounds_updates: Vec<(CefWebview, cef::Rect)> =
@@ -4025,12 +4041,28 @@ fn handle_window_message<T: UserEvent>(
     WindowMessage::SetBackgroundColor(color) => {
       if let Some(app_window) = context.windows.borrow().get(&window_id) {
         app_window.attributes.borrow_mut().background_color = color;
-        let color = color.map(color_to_cef_argb).unwrap_or_else(|| {
+        let cef_color = color.map(color_to_cef_argb).unwrap_or_else(|| {
           app_window
             .window
             .theme_color(ColorId::COLOR_PRIMARY_BACKGROUND.get_raw() as _)
         });
-        app_window.window.set_background_color(color);
+        app_window.window.set_background_color(cef_color);
+      }
+
+      #[cfg(windows)]
+      if let Some(app_window) = context.windows.borrow_mut().get_mut(&window_id) {
+        crate::platform::draw_background_surface(app_window);
+      }
+
+      #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+      ))]
+      if let Some(app_window) = context.windows.borrow().get(&window_id) {
+        crate::platform::set_background_color(&app_window.window, color);
       }
     }
     WindowMessage::StartDragging => {
@@ -4191,6 +4223,8 @@ pub(crate) fn create_window<T: UserEvent>(
     AppWindow {
       label,
       window,
+      #[cfg(windows)]
+      background_surface: None,
       force_close,
       attributes,
       webviews: Vec::new(),
@@ -4198,6 +4232,11 @@ pub(crate) fn create_window<T: UserEvent>(
       webview_event_listeners: Arc::new(Mutex::new(HashMap::new())),
     },
   );
+
+  #[cfg(windows)]
+  if let Some(app_window) = context.windows.borrow_mut().get_mut(&window_id) {
+    crate::platform::draw_background_surface(app_window);
+  }
 
   if let Some(webview) = webview {
     create_webview(

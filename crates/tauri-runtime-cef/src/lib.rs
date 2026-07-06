@@ -353,6 +353,8 @@ pub type WebviewEventListeners =
 pub(crate) struct AppWindow {
   pub label: String,
   pub window: cef::Window,
+  #[cfg(windows)]
+  pub background_surface: Option<crate::platform::BackgroundSurface>,
   pub force_close: Arc<AtomicBool>,
   pub attributes: Arc<RefCell<CefWindowBuilder>>,
   pub webviews: Vec<AppWebview>,

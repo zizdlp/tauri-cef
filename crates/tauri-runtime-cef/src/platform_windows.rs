@@ -2,6 +2,8 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+use std::num::{NonZeroIsize, NonZeroU32};
+
 use cef::ImplWindow;
 use tauri_runtime::dpi::{PhysicalPosition, Position};
 use tauri_runtime::window::CursorIcon;
@@ -16,6 +18,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{ITaskbarList, ITaskbarList3, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::*;
+
+use raw_window_handle::{
+  DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+  Win32WindowHandle, WindowHandle, WindowsDisplayHandle,
+};
 
 fn hwnd(window: &cef::Window) -> HWND {
   HWND(window.window_handle().0 as _)
@@ -95,6 +102,86 @@ pub fn set_always_on_bottom(window: &cef::Window, on_bottom: bool) {
 
 /// Showing a window on all virtual desktops is not supported on Windows.
 pub fn set_visible_on_all_workspaces(_window: &cef::Window, _visible: bool) {}
+
+pub(crate) type BackgroundSurface =
+  softbuffer::Surface<SoftbufferWindowHandle, SoftbufferWindowHandle>;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SoftbufferWindowHandle {
+  display: RawDisplayHandle,
+  window: RawWindowHandle,
+}
+
+impl SoftbufferWindowHandle {
+  fn new(window: &cef::Window) -> Option<Self> {
+    let hwnd = NonZeroIsize::new(window.window_handle().0 as isize)?;
+    let mut window_handle = Win32WindowHandle::new(hwnd);
+    let hinstance = unsafe { GetWindowLongPtrW(HWND(hwnd.get() as _), GWLP_HINSTANCE) };
+    window_handle.hinstance = NonZeroIsize::new(hinstance);
+
+    Some(Self {
+      display: WindowsDisplayHandle::new().into(),
+      window: window_handle.into(),
+    })
+  }
+}
+
+impl HasDisplayHandle for SoftbufferWindowHandle {
+  fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+    Ok(unsafe { DisplayHandle::borrow_raw(self.display) })
+  }
+}
+
+impl HasWindowHandle for SoftbufferWindowHandle {
+  fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+    Ok(unsafe { WindowHandle::borrow_raw(self.window) })
+  }
+}
+
+pub(crate) fn draw_background_surface(app_window: &mut crate::AppWindow) {
+  let attrs = app_window.attributes.borrow();
+  if !attrs.transparent.unwrap_or_default() && attrs.background_color.is_none() {
+    app_window.background_surface = None;
+    return;
+  }
+
+  let size = crate::utils::windows::inner_size(app_window.window.window_handle());
+  let (Some(width), Some(height)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+  else {
+    return;
+  };
+
+  if app_window.background_surface.is_none() {
+    let Some(handle) = SoftbufferWindowHandle::new(&app_window.window) else {
+      return;
+    };
+    let Ok(context) = softbuffer::Context::new(handle) else {
+      return;
+    };
+    let Ok(surface) = softbuffer::Surface::new(&context, handle) else {
+      return;
+    };
+    app_window.background_surface = Some(surface);
+  }
+
+  let Some(surface) = &mut app_window.background_surface else {
+    return;
+  };
+
+  let color = attrs
+    .background_color
+    .map(|tauri_utils::config::Color(r, g, b, _)| {
+      (b as u32) | ((g as u32) << 8) | ((r as u32) << 16)
+    })
+    .unwrap_or(0);
+
+  if surface.resize(width, height).is_ok()
+    && let Ok(mut buffer) = surface.buffer_mut()
+  {
+    buffer.fill(color);
+    let _ = buffer.present();
+  }
+}
 
 pub fn set_shadow(window: &cef::Window, enable: bool) {
   let hwnd = hwnd(window);
