@@ -315,6 +315,8 @@ impl<T: UserEvent, R: Runtime<T>> PartialEq for DetachedWebview<T, R> {
 /// The attributes used to create an webview.
 #[derive(Debug)]
 pub struct WebviewAttributes {
+  /// Hide the webview before it is attached to its native parent.
+  pub initially_hidden: bool,
   pub url: WebviewUrl,
   pub user_agent: Option<String>,
   /// A list of initialization javascript scripts to run when loading new pages.
@@ -475,6 +477,7 @@ impl WebviewAttributes {
   /// Initializes the default attributes for a webview.
   pub fn new(url: WebviewUrl) -> Self {
     Self {
+      initially_hidden: false,
       url,
       user_agent: None,
       initialization_scripts: Vec::new(),

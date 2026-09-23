@@ -1133,7 +1133,7 @@ impl<R: Runtime> Window<R> {
   }
 
   /// Adds a new webview as a child of this window.
-  #[cfg(any(test, all(desktop, feature = "unstable")))]
+  #[cfg(any(test, all(any(desktop, target_os = "ios"), feature = "unstable")))]
   #[cfg_attr(docsrs, doc(cfg(all(desktop, feature = "unstable"))))]
   pub fn add_child<P: Into<Position>, S: Into<Size>>(
     &self,

@@ -143,7 +143,7 @@ use std::{
 pub type WebviewId = u32;
 type IpcHandler = dyn Fn(Request<String>) + 'static;
 
-#[cfg(not(debug_assertions))]
+#[cfg(all(not(debug_assertions), windows))]
 mod dialog;
 mod monitor;
 #[cfg(any(
@@ -4924,6 +4924,7 @@ You may have it installed on another user account, but it is not available for t
 
   let mut webview_builder = WebViewBuilder::new_with_web_context(&mut web_context.inner)
     .with_id(&label)
+    .with_visible(!webview_attributes.initially_hidden)
     .with_focused(webview_attributes.focus)
     .with_transparent(webview_attributes.transparent)
     .with_accept_first_mouse(webview_attributes.accept_first_mouse)

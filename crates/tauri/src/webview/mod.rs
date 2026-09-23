@@ -34,9 +34,11 @@ use tauri_runtime::{
   webview::{DetachedWebview, InitializationScript, PendingWebview, WebviewAttributes},
 };
 #[cfg(desktop)]
+use tauri_runtime::dpi::{PhysicalPosition, PhysicalSize};
+#[cfg(any(desktop, target_os = "ios"))]
 use tauri_runtime::{
   WindowDispatch,
-  dpi::{PhysicalPosition, PhysicalSize, Position, Size},
+  dpi::{Position, Size},
 };
 pub use tauri_utils::config::Color;
 use tauri_utils::config::{BackgroundThrottlingPolicy, WebviewUrl, WindowConfig};
@@ -808,7 +810,7 @@ tauri::Builder::<tauri::Wry>::new()
   }
 
   /// Creates a new webview on the given window.
-  #[cfg(desktop)]
+  #[cfg(any(desktop, target_os = "ios"))]
   pub(crate) fn build(
     self,
     window: Window<R>,
@@ -840,6 +842,16 @@ tauri::Builder::<tauri::Wry>::new()
 
 /// Webview attributes.
 impl<R: Runtime> WebviewBuilder<R> {
+  /// Hide the webview before it is first attached to the native window.
+  /// Defaults to false. The owner must explicitly show a hidden webview
+  /// after placing it in its final container and preparing its content.
+  #[cfg(any(test, feature = "unstable"))]
+  #[must_use]
+  pub fn initially_hidden(mut self, hidden: bool) -> Self {
+    self.webview_attributes.initially_hidden = hidden;
+    self
+  }
+
   /// Sets whether clicking an inactive window also clicks through to the webview.
   #[must_use]
   pub fn accept_first_mouse(mut self, accept: bool) -> Self {
@@ -1521,6 +1533,17 @@ impl<R: Runtime> Webview<R> {
   }
 }
 
+/// Webview lifecycle.
+#[cfg(any(desktop, target_os = "ios"))]
+impl<R: Runtime> Webview<R> {
+  /// Closes this webview and releases its registered resources.
+  pub fn close(&self) -> crate::Result<()> {
+    self.webview.dispatcher.close()?;
+    self.manager().on_webview_close(self.label());
+    Ok(())
+  }
+}
+
 /// Desktop webview setters and actions.
 #[cfg(desktop)]
 impl<R: Runtime> Webview<R> {
@@ -1541,13 +1564,6 @@ impl<R: Runtime> Webview<R> {
   /// The coordinates can be negative if the top-left hand corner of the window is outside of the visible screen region.
   pub fn cursor_position(&self) -> crate::Result<PhysicalPosition<f64>> {
     self.app_handle.cursor_position()
-  }
-
-  /// Closes this webview.
-  pub fn close(&self) -> crate::Result<()> {
-    self.webview.dispatcher.close()?;
-    self.manager().on_webview_close(self.label());
-    Ok(())
   }
 
   /// Resizes this webview.

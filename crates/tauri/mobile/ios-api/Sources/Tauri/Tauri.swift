@@ -42,6 +42,7 @@ public class PluginManager {
     for (_, handle) in plugins {
       if !handle.loaded {
         handle.instance.load(webview: webview)
+        handle.loaded = true
       }
     }
   }

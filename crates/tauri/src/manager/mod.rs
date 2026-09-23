@@ -644,7 +644,7 @@ impl<R: Runtime> AppManager<R> {
     }
   }
 
-  #[cfg(desktop)]
+  #[cfg(any(desktop, target_os = "ios"))]
   pub(crate) fn on_webview_close(&self, label: &str) {
     self.webview.webviews_lock().remove(label);
   }
