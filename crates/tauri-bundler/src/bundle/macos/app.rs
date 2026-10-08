@@ -400,7 +400,19 @@ fn create_info_plist(
     }
   }
 
-  plist::Value::Dictionary(plist).to_file_xml(bundle_dir.join("Info.plist"))?;
+  let info_plist_path = bundle_dir.join("Info.plist");
+  plist::Value::Dictionary(plist).to_file_xml(&info_plist_path)?;
+
+  if settings.bundle_settings().cef_path.is_some() {
+    // Chromium validates a reserialized NSBundle info dictionary against the
+    // signed plist bytes. Match Apple's XML ordering and trailing newline
+    // before signing so dynamic validation does not fail with -67030.
+    Command::new("/usr/bin/plutil")
+      .args(["-convert", "xml1"])
+      .arg(&info_plist_path)
+      .output_ok()
+      .with_context(|| "failed to normalize CEF Info.plist before signing")?;
+  }
 
   Ok(())
 }
